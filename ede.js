@@ -1713,21 +1713,21 @@
             }
 
             if (predictedEpisodeId) {
-                console.log(`[推理匹配] 检测到播放'${direction}'，尝试使用推断的 episodeId: ${predictedEpisodeId}`);
+                console.log(`[推理匹配] 检测到播放'${direction}'，尝试使用推理的 episodeId: ${predictedEpisodeId}`);
                 const comments = await fetchComment(predictedEpisodeId);
                 if (comments && comments.length > 0) {
                     console.log(`[推理匹配] 成功！使用 episodeId: ${predictedEpisodeId}`);
                     const predictedEpisodeInfo = {
                         ...itemInfoMap,
                         episodeId: predictedEpisodeId,
-                        episodeTitle: `第 ${currentEpisodeNumber} 集 (推断)`,
+                        episodeTitle: `第 ${currentEpisodeNumber} 集 (推理)`,
                         animeId: previous_info.animeId,
                         animeTitle: previous_info.animeTitle,
                         imageUrl: previous_info.imageUrl,
                         seriesOrMovieId: seriesOrMovieId,
                         episodeIndex: currentEpisodeNumber - 1,
                     };
-                    // 不写入缓存，因为这只是一个快速的推断
+                    // 不写入缓存，因为这只是一个快速的推理
                     return predictedEpisodeInfo;
                 } else {
                     console.log(`[推理匹配] 失败，episodeId: ${predictedEpisodeId} 无弹幕，回退到常规匹配。`);
