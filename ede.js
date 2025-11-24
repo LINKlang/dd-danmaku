@@ -2074,10 +2074,11 @@
                     ) {
                         reject('当前播放视频未变动');
                     } else {
-                        // 保存上一集的信息，用于下一集/上一集推理
-                        if (window.ede.episode_info) {
-                            window.ede.previous_episode_info = { ...window.ede.episode_info };
-                        }
+                        // // 保存上一集的信息，用于下一集/上一集推理
+                        // 交给最后一个then
+                        // if (window.ede.episode_info) {
+                        //     window.ede.previous_episode_info = { ...window.ede.episode_info };
+                        // }
                         window.ede.episode_info = info;
                         resolve(info.episodeId);
                     }
@@ -2120,6 +2121,9 @@
                 objectEntries(extCommentCache).forEach(([key, val]) => {
                     addExtComments(key, val);
                 })
+                if (window.ede.episode_info) {
+                    window.ede.previous_episode_info = { ...window.ede.episode_info };
+                }
                 window.ede.loading = false;
                 const danmakuCtrEle = getById(eleIds.danmakuCtr);
                 if (danmakuCtrEle && danmakuCtrEle.style.opacity !== '1') {
