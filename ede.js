@@ -4193,6 +4193,15 @@
         const unique_episode_key = lsLocalKeys.apiPrefix + `${enabledApis.join('_')}_` + _episode_key;
         localStorage.setItem(unique_episode_key, JSON.stringify(episodeInfo));
 
+        // 推理时，基于这个正确的数据进行操作
+        if (window.ede.episode_info) {
+             // 仅覆盖属性，保留原对象引用
+             Object.assign(window.ede.episode_info, episodeInfo);
+        } else {
+             window.ede.episode_info = episodeInfo;
+        }
+        window.ede.previous_episode_info = { ...window.ede.episode_info };
+
         console.log(`手动匹配成功，已加载新弹幕信息:`, episodeInfo);
         loadDanmaku(LOAD_TYPE.RELOAD);
         closeEmbyDialog();
