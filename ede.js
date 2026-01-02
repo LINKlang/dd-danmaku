@@ -2054,6 +2054,7 @@
     }
 
     function loadOnlineDanmaku(loadType) {
+        // TODO: 快速切换剧集时正确处理集数
         getEpisodeInfo(loadType !== LOAD_TYPE.SEARCH)
             .then((info) => {
                 return new Promise((resolve, reject) => {
