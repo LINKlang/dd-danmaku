@@ -1726,6 +1726,7 @@
                         imageUrl: previous_info.imageUrl,
                         seriesOrMovieId: seriesOrMovieId,
                         episodeIndex: currentEpisodeNumber - 1,
+                        bgmEpisodeIndex: currentEpisodeNumber - 1,
                     };
                     // 不写入缓存，因为这只是一个快速的推理
                     return predictedEpisodeInfo;
