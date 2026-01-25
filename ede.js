@@ -210,7 +210,12 @@
             timeoutCallbackClear(), timeoutCallbackId = setTimeout(() => { closeEmbyDialog(), Emby.Page.goHome() }, ms);
         } },
     ];
-    const getApiTl = fn => fn.toString().match(/\=>\s*(.*)$/)[1].trim().replace(/`/g, '');
+    const getApiTl = (fn) => {
+        if (!fn || typeof fn.toString !== 'function') { return ''; }
+        const match = fn.toString().match(/\=>\s*(.*)$/);
+        if (!match || !match[1]) { return ''; }
+        return match[1].trim().replace(/`/g, '');
+    };
     const labels = {
         enable: '启用',
     };
@@ -1068,7 +1073,7 @@
     }
 
     // 通过缓存中的剧集名称与偏移量进行匹配
-    async function lsSeasonSearchEpisodes(_season_key, episode) {
+    async function lsSeasonSearchEpisodes(_season_key, episode, prefix) {
         const seasonInfoListStr = window.localStorage.getItem(_season_key);
         if (!seasonInfoListStr) {
             return null;
@@ -1087,7 +1092,7 @@
         if (selectedSeasonInfo) {
             const newEpisode = episode + selectedSeasonInfo.episodeOffset;
             console.log(`命中seasonInfo缓存: ${selectedSeasonInfo.name},偏移量: ${selectedSeasonInfo.episodeOffset},集: ${newEpisode}`);
-            const animaInfo = await fetchSearchEpisodes(selectedSeasonInfo.name, newEpisode);
+            const animaInfo = await fetchSearchEpisodes(selectedSeasonInfo.name, newEpisode, prefix);
             return { animaInfo, newEpisode, };
         }
         return null;
@@ -1547,6 +1552,21 @@
             official: { name: '官方API', prefix: corsProxy + 'https://api.dandanplay.net/api/v2', enabled: lsGetItem(lsKeys.useOfficialApi.id) },
             custom: { name: '自定义API', prefix: lsGetItem(lsKeys.customApiPrefix.id), enabled: lsGetItem(lsKeys.useCustomApi.id) }
         };
+        // 计算默认 API 配置（用于赛季缓存和默认匹配）
+        const currentPriority = (Array.isArray(apiPriority) && apiPriority[0] === 'custom' && apiConfigs.custom.enabled && apiConfigs.custom.prefix?.trim())
+            ? 'custom'
+            : 'official';
+        const selectedApiConfig = (apiConfigs[currentPriority].enabled && apiConfigs[currentPriority].prefix?.trim())
+            ? apiConfigs[currentPriority]
+            : apiConfigs.custom;
+
+        // 有赛季缓存时优先用赛季缓存（手动匹配后写入的 _anime_season_rel_*），避免哈希+智能匹配选错
+        const animaRes = await lsSeasonSearchEpisodes(_season_key, episode, selectedApiConfig.prefix);
+        if (animaRes && animaRes.animaInfo && animaRes.animaInfo.animes.length > 0) {
+            const bgmEpisodeIndex = animaRes.newEpisode - 1;
+            console.log(`[自动匹配] 命中赛季缓存，直接使用`);
+            return { animeOriginalTitle: '', animaInfo: animaRes.animaInfo, bgmEpisodeIndex };
+        }
 
         // 尝试哈希匹配(含 /match 调用)
         const hashMatchResult = await tryMatchByHash(episodeName, streamUrl, size, duration, apiConfigs, apiPriority);
@@ -1588,22 +1608,7 @@
             }
         }
 
-        // 使用缓存中的剧集标题与集偏移量进行匹配
-        let animaRes = await lsSeasonSearchEpisodes(_season_key, episode);
-        if (animaRes) {
-            const bgmEpisodeIndex = animaRes.newEpisode - 1;
-            if (animaRes.animaInfo && animaRes.animaInfo.animes.length > 0) {
-                return { animeOriginalTitle: '', animaInfo: animaRes.animaInfo, bgmEpisodeIndex };
-            }
-        }
-
-        // 默认匹配方式
-        const currentPriority = apiPriority === 'custom' && apiConfigs.custom.enabled && apiConfigs.custom.prefix?.trim()
-            ? 'custom'
-            : 'official';
-        const selectedApiConfig = (apiConfigs[currentPriority].enabled && apiConfigs[currentPriority].prefix?.trim())
-            ? apiConfigs[currentPriority]
-            : apiConfigs.custom;
+        // 默认匹配方式（复用前文已计算的 selectedApiConfig）
         const animaInfo = await fetchSearchEpisodes(animeName, episode, selectedApiConfig.prefix);
         if (animaInfo && animaInfo.animes.length > 0) {
             return { animeOriginalTitle: '', animaInfo };
@@ -2074,8 +2079,11 @@
                     ) {
                         reject('当前播放视频未变动');
                     } else {
-                        // 保存上一集的信息，用于下一集/上一集推理
-                        if (window.ede.episode_info) {
+                        // 仅在真正切换剧集（INIT/CHECK）时更新 previous_episode_info，用于下一集/上一集推理。
+                        // RELOAD/REFRESH 为同集重载（如手动匹配修正、过滤/简繁切换），若更新 previous
+                        // 会拿「修正前的错误匹配」覆盖它，导致下一集推理错用错误信息。
+                        const isSwitchingEpisode = loadType === LOAD_TYPE.INIT || loadType === LOAD_TYPE.CHECK;
+                        if (isSwitchingEpisode && window.ede.episode_info) {
                             window.ede.previous_episode_info = { ...window.ede.episode_info };
                         }
                         window.ede.episode_info = info;
