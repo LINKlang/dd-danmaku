@@ -1764,6 +1764,19 @@ function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == 
     console.log("[API\u8BF7\u6C42] search/episodes \u67E5\u8BE2\u6210\u529F", searchResult);
     return searchResult;
   }
+  async function fetchSearchEpisodesByTmdbId(tmdbId, prefix) {
+    var _searchResult$animes;
+    if (!tmdbId) return null;
+    var url = "".concat(prefix, "/search/episodes?tmdbId=").concat(tmdbId);
+    var searchResult = await fetchJson(url).catch(function (error) {
+      console.error("[API\u8BF7\u6C42] search/episodes(tmdbId) \u67E5\u8BE2\u5931\u8D25: ".concat(error.message));
+      return null;
+    });
+    if (searchResult && ((_searchResult$animes = searchResult.animes) === null || _searchResult$animes === void 0 ? void 0 : _searchResult$animes.length) > 0) {
+      console.log("[API\u8BF7\u6C42] search/episodes(tmdbId=".concat(tmdbId, ") \u67E5\u8BE2\u6210\u529F, animes: ").concat(searchResult.animes.length));
+    }
+    return searchResult;
+  }
   async function fetchComment(episodeId) {
     var _window$ede$episode_i;
     // 优先使用当前匹配信息中记录的 API 地址
@@ -2012,6 +2025,26 @@ function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == 
     if (!item) {
       return null;
     } // getEmbyItemInfo from playbackManager null, will next called
+
+    // 获取整部剧的 tmdbId：剧集从 Series 的 ProviderIds 获取，电影从 item 的 ProviderIds 获取
+    var getProviderId = function getProviderId(providerIds, key) {
+      if (!providerIds || _typeof(providerIds) !== 'object') return null;
+      var k = Object.keys(providerIds).find(function (kk) {
+        return kk.toLowerCase() === key.toLowerCase();
+      });
+      return k ? providerIds[k] : null;
+    };
+    var seriesTmdbId = null;
+    if (item.Type === 'Episode' && item.SeriesId) {
+      try {
+        var seriesInfo = await ApiClient.getItem(ApiClient.getCurrentUserId(), item.SeriesId);
+        seriesTmdbId = getProviderId(seriesInfo === null || seriesInfo === void 0 ? void 0 : seriesInfo.ProviderIds, 'Tmdb');
+      } catch (e) {
+        console.warn('[tmdbId] 获取剧集 tmdbId 失败:', e);
+      }
+    } else if (item.Type === 'Movie') {
+      seriesTmdbId = getProviderId(item.ProviderIds, 'Tmdb');
+    }
     if (!['Episode', 'Movie'].includes(item.Type)) {
       return console.error('不支持的类型');
     }
@@ -2096,6 +2129,8 @@ function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == 
       // this is episode index, not a program index
       animeName: animeName,
       seriesOrMovieId: item.SeriesId || item.Id,
+      seriesTmdbId: seriesTmdbId,
+      // 整部剧的 tmdbId（剧集从 Series 获取，电影从 item 获取）
       // 新增：提取匹配所需的文件信息
       streamUrl: streamUrl,
       size: mediaSource === null || mediaSource === void 0 ? void 0 : mediaSource.Size,
@@ -2653,6 +2688,13 @@ function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == 
       };
     }
 
+    // 尝试 tmdbId 匹配（季度剧集含 tvseries/tvspecial/web，电影取首个正片）
+    var tmdbMatchResult = await tryMatchByTmdbId(itemInfoMap, apiConfigs, apiPriority);
+    if (tmdbMatchResult) {
+      debugger;
+      return tmdbMatchResult;
+    }
+
     // 尝试哈希匹配(含 /match 调用)
     var hashMatchResult = await tryMatchByHash(episodeName, streamUrl, size, duration, apiConfigs, apiPriority);
     if (hashMatchResult) {
@@ -2719,6 +2761,128 @@ function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == 
       return res;
     }
   }
+
+  /** 排除特典集（Sn/Cn 开头），返回正片数组（按原顺序） */
+  function filterMainEpisodes(episodes) {
+    if (!episodes || !Array.isArray(episodes)) return [];
+    return episodes.filter(function (ep) {
+      return !/^[SC]\d+\s/.test(ep.episodeTitle || '');
+    });
+  }
+  async function tryMatchByTmdbId(itemInfoMap, apiConfigs, apiPriority) {
+    var seriesTmdbId = itemInfoMap.seriesTmdbId,
+      seasonNumber = itemInfoMap.seasonNumber,
+      episodeNumber = itemInfoMap.episodeNumber,
+      episode = itemInfoMap.episode;
+    if (!seriesTmdbId) return null;
+    var _iterator2 = _createForOfIteratorHelper(apiPriority),
+      _step2;
+    try {
+      for (_iterator2.s(); !(_step2 = _iterator2.n()).done;) {
+        var _animaInfo2$animes;
+        var apiKey = _step2.value;
+        var config = apiConfigs[apiKey];
+        if (!config || !config.enabled || apiKey === 'custom' && !config.prefix) continue;
+        var _animaInfo2 = await fetchSearchEpisodesByTmdbId(seriesTmdbId, config.prefix);
+        if (!_animaInfo2 || !((_animaInfo2$animes = _animaInfo2.animes) !== null && _animaInfo2$animes !== void 0 && _animaInfo2$animes.length)) continue;
+        var animes = _animaInfo2.animes;
+
+        // 电影：取第一个 anime 的首个正片
+        if (episode === 'movie') {
+          var _firstAnime$episodes;
+          var firstAnime = animes[0];
+          var mainEps = filterMainEpisodes(firstAnime.episodes);
+          var ep = mainEps[0] || ((_firstAnime$episodes = firstAnime.episodes) === null || _firstAnime$episodes === void 0 ? void 0 : _firstAnime$episodes[0]);
+          if (ep) {
+            console.log("[tmdbId\u5339\u914D] \u7535\u5F71\u5339\u914D\u6210\u529F: ".concat(firstAnime.animeTitle));
+            return {
+              directMatch: true,
+              apiPrefix: config.prefix,
+              apiName: config.name,
+              episodeInfo: {
+                episodeId: ep.episodeId,
+                episodeTitle: ep.episodeTitle,
+                animeId: firstAnime.animeId,
+                animeTitle: firstAnime.animeTitle,
+                imageUrl: dandanplayApi.posterImg(firstAnime.animeId)
+              }
+            };
+          }
+          continue;
+        }
+
+        // 季度剧集：tvseries、tvspecial、web 参与；ova 单独处理
+        var seasonAnimes = animes.filter(function (a) {
+          return ['tvseries', 'tvspecial', 'web'].includes(a.type);
+        });
+        var ovaAnimes = animes.filter(function (a) {
+          return a.type === 'ova';
+        });
+        var epNum = typeof episodeNumber === 'number' ? episodeNumber : parseInt(episode, 10);
+        if (isNaN(epNum) || epNum < 1) continue;
+        var season = seasonNumber != null ? seasonNumber : 1;
+        var matchedEp = null;
+        var matchedAnime = null;
+        if (season === 0) {
+          // 第 0 季 = OVA，按季度数组顺序拼接 OVA，取 episodeNumber 对应集
+          var ovaPairs = ovaAnimes.flatMap(function (a) {
+            return filterMainEpisodes(a.episodes).map(function (ep) {
+              return {
+                anime: a,
+                ep: ep
+              };
+            });
+          });
+          var pair = ovaPairs[epNum - 1];
+          if (pair) {
+            matchedEp = pair.ep;
+            matchedAnime = pair.anime;
+          }
+        } else if (season >= 2) {
+          // 非第 0/1 季：直接按季度顺序和集数匹配
+          var targetAnime = seasonAnimes[season - 1];
+          if (targetAnime) {
+            var _mainEps = filterMainEpisodes(targetAnime.episodes);
+            matchedEp = _mainEps[epNum - 1];
+            matchedAnime = targetAnime;
+          }
+        } else {
+          // 第 1 季：可能为 TMDB 合并多季，按累计集数判断实际季度
+          var acc = 0;
+          for (var i = 0; i < seasonAnimes.length; i++) {
+            var _mainEps2 = filterMainEpisodes(seasonAnimes[i].episodes);
+            var count = _mainEps2.length;
+            if (epNum <= acc + count) {
+              matchedEp = _mainEps2[epNum - acc - 1];
+              matchedAnime = seasonAnimes[i];
+              break;
+            }
+            acc += count;
+          }
+        }
+        if (matchedEp && matchedAnime) {
+          console.log("[tmdbId\u5339\u914D] \u5B63\u5EA6\u5267\u96C6\u5339\u914D\u6210\u529F: ".concat(matchedAnime.animeTitle, " - ").concat(matchedEp.episodeTitle));
+          return {
+            directMatch: true,
+            apiPrefix: config.prefix,
+            apiName: config.name,
+            episodeInfo: {
+              episodeId: matchedEp.episodeId,
+              episodeTitle: matchedEp.episodeTitle,
+              animeId: matchedAnime.animeId,
+              animeTitle: matchedAnime.animeTitle,
+              imageUrl: dandanplayApi.posterImg(matchedAnime.animeId)
+            }
+          };
+        }
+      }
+    } catch (err) {
+      _iterator2.e(err);
+    } finally {
+      _iterator2.f();
+    }
+    return null;
+  }
   async function tryMatchByHash(animeName, streamUrl, size, duration, apiConfigs, apiPriority) {
     var matchPayload = {
       fileName: animeName,
@@ -2745,11 +2909,11 @@ function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == 
     }
 
     // 尝试 /match 接口（按优先级）
-    var _iterator2 = _createForOfIteratorHelper(apiPriority),
-      _step2;
+    var _iterator3 = _createForOfIteratorHelper(apiPriority),
+      _step3;
     try {
-      for (_iterator2.s(); !(_step2 = _iterator2.n()).done;) {
-        var apiKey = _step2.value;
+      for (_iterator3.s(); !(_step3 = _iterator3.n()).done;) {
+        var apiKey = _step3.value;
         var config = apiConfigs[apiKey];
         if (!config || !config.enabled || apiKey === 'custom' && !config.prefix) {
           continue;
@@ -2797,9 +2961,9 @@ function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == 
         }
       }
     } catch (err) {
-      _iterator2.e(err);
+      _iterator3.e(err);
     } finally {
-      _iterator2.f();
+      _iterator3.f();
     }
     return null;
   }
@@ -2813,6 +2977,21 @@ function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == 
       animeId = itemInfoMap.animeId,
       episode = itemInfoMap.episode,
       seriesOrMovieId = itemInfoMap.seriesOrMovieId;
+
+    // 修正缓存键，区分官方和自定义API
+    var useOfficialApi = lsGetItem(lsKeys.useOfficialApi.id);
+    var useCustomApi = lsGetItem(lsKeys.useCustomApi.id);
+    var apiPriority = lsGetItem(lsKeys.apiPriority.id);
+    var enabledApis = apiPriority.filter(function (apiKey) {
+      if (apiKey === 'official') return useOfficialApi;
+      if (apiKey === 'custom') return useCustomApi;
+      return false;
+    });
+    var unique_episode_key = lsLocalKeys.apiPrefix + "".concat(enabledApis.join('_'), "_") + _episode_key;
+    // 单集缓存优先于上下集推理
+    if (is_auto && window.localStorage.getItem(unique_episode_key)) {
+      return JSON.parse(window.localStorage.getItem(unique_episode_key));
+    }
 
     // 下一集/上一集推理逻辑
     var previous_info = window.ede.previous_episode_info;
@@ -2853,20 +3032,6 @@ function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == 
           console.log("[\u63A8\u7406\u5339\u914D] \u5931\u8D25\uFF0CepisodeId: ".concat(predictedEpisodeId, " \u65E0\u5F39\u5E55\uFF0C\u56DE\u9000\u5230\u5E38\u89C4\u5339\u914D\u3002"));
         }
       }
-    }
-
-    // 修正缓存键，区分官方和自定义API
-    var useOfficialApi = lsGetItem(lsKeys.useOfficialApi.id);
-    var useCustomApi = lsGetItem(lsKeys.useCustomApi.id);
-    var apiPriority = lsGetItem(lsKeys.apiPriority.id);
-    var enabledApis = apiPriority.filter(function (apiKey) {
-      if (apiKey === 'official') return useOfficialApi;
-      if (apiKey === 'custom') return useCustomApi;
-      return false;
-    });
-    var unique_episode_key = lsLocalKeys.apiPrefix + "".concat(enabledApis.join('_'), "_") + _episode_key;
-    if (is_auto && window.localStorage.getItem(unique_episode_key)) {
-      return JSON.parse(window.localStorage.getItem(unique_episode_key));
     }
     var res = await searchEpisodes(itemInfoMap);
     var useOfficial = lsGetItem(lsKeys.useOfficialApi.id);
@@ -2959,11 +3124,11 @@ function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == 
       var parser = new DOMParser();
       var data = parser.parseFromString(xmlText, 'text/xml');
       var comments = [];
-      var _iterator3 = _createForOfIteratorHelper(data.getElementsByTagName('d')),
-        _step3;
+      var _iterator4 = _createForOfIteratorHelper(data.getElementsByTagName('d')),
+        _step4;
       try {
-        for (_iterator3.s(); !(_step3 = _iterator3.n()).done;) {
-          var comment = _step3.value;
+        for (_iterator4.s(); !(_step4 = _iterator4.n()).done;) {
+          var comment = _step4.value;
           var p = comment.getAttribute('p').split(',').map(Number);
           var commentData = {
             cid: p[7],
@@ -2973,9 +3138,9 @@ function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == 
           comments.push(commentData);
         }
       } catch (err) {
-        _iterator3.e(err);
+        _iterator4.e(err);
       } finally {
-        _iterator3.f();
+        _iterator4.f();
       }
       return comments;
     } catch (error) {
@@ -4953,11 +5118,11 @@ function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == 
       }
     };
     var allAnimes = [];
-    var _iterator4 = _createForOfIteratorHelper(apiPriority),
-      _step4;
+    var _iterator5 = _createForOfIteratorHelper(apiPriority),
+      _step5;
     try {
       var _loop = async function _loop() {
-        var apiKey = _step4.value;
+        var apiKey = _step5.value;
         var config = apiConfigs[apiKey];
         // 确保自定义API有地址时才使用
         if (!config || !config.enabled || apiKey === 'custom' && !config.prefix) {
@@ -4989,13 +5154,13 @@ function _typeof(o) { "@babel/helpers - typeof"; return _typeof = "function" == 
           console.log("[\u624B\u52A8\u5339\u914D][".concat(config.name, "] \u672A\u627E\u5230\u7ED3\u679C\u3002"));
         }
       };
-      for (_iterator4.s(); !(_step4 = _iterator4.n()).done;) {
+      for (_iterator5.s(); !(_step5 = _iterator5.n()).done;) {
         if (await _loop()) continue;
       }
     } catch (err) {
-      _iterator4.e(err);
+      _iterator5.e(err);
     } finally {
-      _iterator4.f();
+      _iterator5.f();
     }
     spinnerEle && spinnerEle.classList.add('hide');
     if (allAnimes.length < 1) {

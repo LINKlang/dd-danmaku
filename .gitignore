@@ -39,3 +39,4 @@ coverage/
 # 其他
 *.bak
 *.backup
+node_modules.7z
