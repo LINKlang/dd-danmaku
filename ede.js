@@ -1877,21 +1877,22 @@
             }
 
             if (predictedEpisodeId) {
-                console.log(`[推理匹配] 检测到播放'${direction}'，尝试使用推断的 episodeId: ${predictedEpisodeId}`);
+                console.log(`[推理匹配] 检测到播放'${direction}'，尝试使用推理的 episodeId: ${predictedEpisodeId}`);
                 const comments = await fetchComment(predictedEpisodeId);
                 if (comments && comments.length > 0) {
                     console.log(`[推理匹配] 成功！使用 episodeId: ${predictedEpisodeId}`);
                     const predictedEpisodeInfo = {
                         ...itemInfoMap,
                         episodeId: predictedEpisodeId,
-                        episodeTitle: `第 ${currentEpisodeNumber} 集 (推断)`,
+                        episodeTitle: `第 ${currentEpisodeNumber} 集 (推理)`,
                         animeId: previous_info.animeId,
                         animeTitle: previous_info.animeTitle,
                         imageUrl: previous_info.imageUrl,
                         seriesOrMovieId: seriesOrMovieId,
                         episodeIndex: currentEpisodeNumber - 1,
+                        bgmEpisodeIndex: currentEpisodeNumber - 1,
                     };
-                    // 不写入缓存，因为这只是一个快速的推断
+                    // 不写入缓存，因为这只是一个快速的推理
                     return predictedEpisodeInfo;
                 } else {
                     console.log(`[推理匹配] 失败，episodeId: ${predictedEpisodeId} 无弹幕，回退到常规匹配。`);
@@ -2203,6 +2204,7 @@
     }
 
     function loadOnlineDanmaku(loadType) {
+        // TODO: 快速切换剧集时正确处理集数
         getEpisodeInfo(loadType !== LOAD_TYPE.SEARCH)
             .then((info) => {
                 return new Promise((resolve, reject) => {
@@ -2224,13 +2226,11 @@
                     ) {
                         reject('当前播放视频未变动');
                     } else {
-                        // 仅在真正切换剧集（INIT/CHECK）时更新 previous_episode_info，用于下一集/上一集推理。
-                        // RELOAD/REFRESH 为同集重载（如手动匹配修正、过滤/简繁切换），若更新 previous
-                        // 会拿「修正前的错误匹配」覆盖它，导致下一集推理错用错误信息。
-                        const isSwitchingEpisode = loadType === LOAD_TYPE.INIT || loadType === LOAD_TYPE.CHECK;
-                        if (isSwitchingEpisode && window.ede.episode_info) {
-                            window.ede.previous_episode_info = { ...window.ede.episode_info };
-                        }
+                        // // 保存上一集的信息，用于下一集/上一集推理
+                        // 交给最后一个then
+                        // if (window.ede.episode_info) {
+                        //     window.ede.previous_episode_info = { ...window.ede.episode_info };
+                        // }
                         window.ede.episode_info = info;
                         resolve(info.episodeId);
                     }
@@ -2273,6 +2273,9 @@
                 objectEntries(extCommentCache).forEach(([key, val]) => {
                     addExtComments(key, val);
                 })
+                if (window.ede.episode_info) {
+                    window.ede.previous_episode_info = { ...window.ede.episode_info };
+                }
                 window.ede.loading = false;
                 const danmakuCtrEle = getById(eleIds.danmakuCtr);
                 if (danmakuCtrEle && danmakuCtrEle.style.opacity !== '1') {
@@ -4345,6 +4348,15 @@
         });
         const unique_episode_key = lsLocalKeys.apiPrefix + `${enabledApis.join('_')}_` + _episode_key;
         localStorage.setItem(unique_episode_key, JSON.stringify(episodeInfo));
+
+        // 推理时，基于这个正确的数据进行操作
+        if (window.ede.episode_info) {
+             // 仅覆盖属性，保留原对象引用
+             Object.assign(window.ede.episode_info, episodeInfo);
+        } else {
+             window.ede.episode_info = episodeInfo;
+        }
+        window.ede.previous_episode_info = { ...window.ede.episode_info };
 
         console.log(`手动匹配成功，已加载新弹幕信息:`, episodeInfo);
         loadDanmaku(LOAD_TYPE.RELOAD);
