@@ -210,7 +210,12 @@
             timeoutCallbackClear(), timeoutCallbackId = setTimeout(() => { closeEmbyDialog(), Emby.Page.goHome() }, ms);
         } },
     ];
-    const getApiTl = fn => fn.toString().match(/\=>\s*(.*)$/)[1].trim().replace(/`/g, '');
+    const getApiTl = (fn) => {
+        if (!fn || typeof fn.toString !== 'function') { return ''; }
+        const match = fn.toString().match(/\=>\s*(.*)$/);
+        if (!match || !match[1]) { return ''; }
+        return match[1].trim().replace(/`/g, '');
+    };
     const labels = {
         enable: '启用',
     };
@@ -768,6 +773,20 @@
         return searchResult;
     }
 
+    async function fetchSearchEpisodesByTmdbId(tmdbId, prefix) {
+        if (!tmdbId) return null;
+        const url = `${prefix}/search/episodes?tmdbId=${tmdbId}`;
+        const searchResult = await fetchJson(url)
+            .catch((error) => {
+                console.error(`[API请求] search/episodes(tmdbId) 查询失败: ${error.message}`);
+                return null;
+            });
+        if (searchResult && searchResult.animes?.length > 0) {
+            console.log(`[API请求] search/episodes(tmdbId=${tmdbId}) 查询成功, animes: ${searchResult.animes.length}`);
+        }
+        return searchResult;
+    }
+
     async function fetchComment(episodeId) {
         // 优先使用当前匹配信息中记录的 API 地址
         const prefix = window.ede.episode_info?.apiPrefix || dandanplayApi.prefix;
@@ -970,6 +989,24 @@
             item = await fatchEmbyItemInfo(window.ede.itemId);
         }
         if (!item) { return null; } // getEmbyItemInfo from playbackManager null, will next called
+
+        // 获取整部剧的 tmdbId：剧集从 Series 的 ProviderIds 获取，电影从 item 的 ProviderIds 获取
+        const getProviderId = (providerIds, key) => {
+            if (!providerIds || typeof providerIds !== 'object') return null;
+            const k = Object.keys(providerIds).find(kk => kk.toLowerCase() === key.toLowerCase());
+            return k ? providerIds[k] : null;
+        };
+        let seriesTmdbId = null;
+        if (item.Type === 'Episode' && item.SeriesId) {
+            try {
+                const seriesInfo = await ApiClient.getItem(ApiClient.getCurrentUserId(), item.SeriesId);
+                seriesTmdbId = getProviderId(seriesInfo?.ProviderIds, 'Tmdb');
+            } catch (e) {
+                console.warn('[tmdbId] 获取剧集 tmdbId 失败:', e);
+            }
+        } else if (item.Type === 'Movie') {
+            seriesTmdbId = getProviderId(item.ProviderIds, 'Tmdb');
+        }
         if (!['Episode', 'Movie'].includes(item.Type)) {
             return console.error('不支持的类型');
         }
@@ -1056,6 +1093,7 @@
             episode: episode, // this is episode index, not a program index
             animeName: animeName,
             seriesOrMovieId: item.SeriesId || item.Id,
+            seriesTmdbId,   // 整部剧的 tmdbId（剧集从 Series 获取，电影从 item 获取）
             // 新增：提取匹配所需的文件信息
             streamUrl: streamUrl,
             size: mediaSource?.Size,
@@ -1068,7 +1106,7 @@
     }
 
     // 通过缓存中的剧集名称与偏移量进行匹配
-    async function lsSeasonSearchEpisodes(_season_key, episode) {
+    async function lsSeasonSearchEpisodes(_season_key, episode, prefix) {
         const seasonInfoListStr = window.localStorage.getItem(_season_key);
         if (!seasonInfoListStr) {
             return null;
@@ -1087,7 +1125,7 @@
         if (selectedSeasonInfo) {
             const newEpisode = episode + selectedSeasonInfo.episodeOffset;
             console.log(`命中seasonInfo缓存: ${selectedSeasonInfo.name},偏移量: ${selectedSeasonInfo.episodeOffset},集: ${newEpisode}`);
-            const animaInfo = await fetchSearchEpisodes(selectedSeasonInfo.name, newEpisode);
+            const animaInfo = await fetchSearchEpisodes(selectedSeasonInfo.name, newEpisode, prefix);
             return { animaInfo, newEpisode, };
         }
         return null;
@@ -1547,6 +1585,28 @@
             official: { name: '官方API', prefix: corsProxy + 'https://api.dandanplay.net/api/v2', enabled: lsGetItem(lsKeys.useOfficialApi.id) },
             custom: { name: '自定义API', prefix: lsGetItem(lsKeys.customApiPrefix.id), enabled: lsGetItem(lsKeys.useCustomApi.id) }
         };
+        // 计算默认 API 配置（用于赛季缓存和默认匹配）
+        const currentPriority = (Array.isArray(apiPriority) && apiPriority[0] === 'custom' && apiConfigs.custom.enabled && apiConfigs.custom.prefix?.trim())
+            ? 'custom'
+            : 'official';
+        const selectedApiConfig = (apiConfigs[currentPriority].enabled && apiConfigs[currentPriority].prefix?.trim())
+            ? apiConfigs[currentPriority]
+            : apiConfigs.custom;
+
+        // 有赛季缓存时优先用赛季缓存（手动匹配后写入的 _anime_season_rel_*），避免哈希+智能匹配选错
+        const animaRes = await lsSeasonSearchEpisodes(_season_key, episode, selectedApiConfig.prefix);
+        if (animaRes && animaRes.animaInfo && animaRes.animaInfo.animes.length > 0) {
+            const bgmEpisodeIndex = animaRes.newEpisode - 1;
+            console.log(`[自动匹配] 命中赛季缓存，直接使用`);
+            return { animeOriginalTitle: '', animaInfo: animaRes.animaInfo, bgmEpisodeIndex };
+        }
+
+        // 尝试 tmdbId 匹配（季度剧集含 tvseries/tvspecial/web，电影取首个正片）
+        const tmdbMatchResult = await tryMatchByTmdbId(itemInfoMap, apiConfigs, apiPriority);
+        if (tmdbMatchResult) {
+            debugger;
+            return tmdbMatchResult;
+        }
 
         // 尝试哈希匹配(含 /match 调用)
         const hashMatchResult = await tryMatchByHash(episodeName, streamUrl, size, duration, apiConfigs, apiPriority);
@@ -1588,22 +1648,7 @@
             }
         }
 
-        // 使用缓存中的剧集标题与集偏移量进行匹配
-        let animaRes = await lsSeasonSearchEpisodes(_season_key, episode);
-        if (animaRes) {
-            const bgmEpisodeIndex = animaRes.newEpisode - 1;
-            if (animaRes.animaInfo && animaRes.animaInfo.animes.length > 0) {
-                return { animeOriginalTitle: '', animaInfo: animaRes.animaInfo, bgmEpisodeIndex };
-            }
-        }
-
-        // 默认匹配方式
-        const currentPriority = apiPriority === 'custom' && apiConfigs.custom.enabled && apiConfigs.custom.prefix?.trim()
-            ? 'custom'
-            : 'official';
-        const selectedApiConfig = (apiConfigs[currentPriority].enabled && apiConfigs[currentPriority].prefix?.trim())
-            ? apiConfigs[currentPriority]
-            : apiConfigs.custom;
+        // 默认匹配方式（复用前文已计算的 selectedApiConfig）
         const animaInfo = await fetchSearchEpisodes(animeName, episode, selectedApiConfig.prefix);
         if (animaInfo && animaInfo.animes.length > 0) {
             return { animeOriginalTitle: '', animaInfo };
@@ -1613,6 +1658,110 @@
         if (res) {
             return res;
         }
+    }
+
+    /** 排除特典集（Sn/Cn 开头），返回正片数组（按原顺序） */
+    function filterMainEpisodes(episodes) {
+        if (!episodes || !Array.isArray(episodes)) return [];
+        return episodes.filter((ep) => !/^[SC]\d+\s/.test(ep.episodeTitle || ''));
+    }
+
+    async function tryMatchByTmdbId(itemInfoMap, apiConfigs, apiPriority) {
+        const { seriesTmdbId, seasonNumber, episodeNumber, episode } = itemInfoMap;
+        if (!seriesTmdbId) return null;
+
+        for (const apiKey of apiPriority) {
+            const config = apiConfigs[apiKey];
+            if (!config || !config.enabled || (apiKey === 'custom' && !config.prefix)) continue;
+
+            const animaInfo = await fetchSearchEpisodesByTmdbId(seriesTmdbId, config.prefix);
+            if (!animaInfo || !animaInfo.animes?.length) continue;
+
+            const animes = animaInfo.animes;
+
+            // 电影：取第一个 anime 的首个正片
+            if (episode === 'movie') {
+                const firstAnime = animes[0];
+                const mainEps = filterMainEpisodes(firstAnime.episodes);
+                const ep = mainEps[0] || firstAnime.episodes?.[0];
+                if (ep) {
+                    console.log(`[tmdbId匹配] 电影匹配成功: ${firstAnime.animeTitle}`);
+                    return {
+                        directMatch: true,
+                        apiPrefix: config.prefix,
+                        apiName: config.name,
+                        episodeInfo: {
+                            episodeId: ep.episodeId,
+                            episodeTitle: ep.episodeTitle,
+                            animeId: firstAnime.animeId,
+                            animeTitle: firstAnime.animeTitle,
+                            imageUrl: dandanplayApi.posterImg(firstAnime.animeId)
+                        }
+                    };
+                }
+                continue;
+            }
+
+            // 季度剧集：tvseries、tvspecial、web 参与；ova 单独处理
+            const seasonAnimes = animes.filter((a) => ['tvseries', 'tvspecial', 'web'].includes(a.type));
+            const ovaAnimes = animes.filter((a) => a.type === 'ova');
+            const epNum = typeof episodeNumber === 'number' ? episodeNumber : parseInt(episode, 10);
+            if (isNaN(epNum) || epNum < 1) continue;
+            const season = seasonNumber != null ? seasonNumber : 1;
+
+            let matchedEp = null;
+            let matchedAnime = null;
+
+            if (season === 0) {
+                // 第 0 季 = OVA，按季度数组顺序拼接 OVA，取 episodeNumber 对应集
+                const ovaPairs = ovaAnimes.flatMap((a) =>
+                    filterMainEpisodes(a.episodes).map((ep) => ({ anime: a, ep }))
+                );
+                const pair = ovaPairs[epNum - 1];
+                if (pair) {
+                    matchedEp = pair.ep;
+                    matchedAnime = pair.anime;
+                }
+            } else if (season >= 2) {
+                // 非第 0/1 季：直接按季度顺序和集数匹配
+                const targetAnime = seasonAnimes[season - 1];
+                if (targetAnime) {
+                    const mainEps = filterMainEpisodes(targetAnime.episodes);
+                    matchedEp = mainEps[epNum - 1];
+                    matchedAnime = targetAnime;
+                }
+            } else {
+                // 第 1 季：可能为 TMDB 合并多季，按累计集数判断实际季度
+                let acc = 0;
+                for (let i = 0; i < seasonAnimes.length; i++) {
+                    const mainEps = filterMainEpisodes(seasonAnimes[i].episodes);
+                    const count = mainEps.length;
+                    if (epNum <= acc + count) {
+                        matchedEp = mainEps[epNum - acc - 1];
+                        matchedAnime = seasonAnimes[i];
+                        break;
+                    }
+                    acc += count;
+                }
+            }
+
+            if (matchedEp && matchedAnime) {
+                console.log(`[tmdbId匹配] 季度剧集匹配成功: ${matchedAnime.animeTitle} - ${matchedEp.episodeTitle}`);
+                return {
+                    directMatch: true,
+                    apiPrefix: config.prefix,
+                    apiName: config.name,
+                    episodeInfo: {
+                        episodeId: matchedEp.episodeId,
+                        episodeTitle: matchedEp.episodeTitle,
+                        animeId: matchedAnime.animeId,
+                        animeTitle: matchedAnime.animeTitle,
+                        imageUrl: dandanplayApi.posterImg(matchedAnime.animeId)
+                    }
+                };
+            }
+        }
+        return null;
     }
 
     async function tryMatchByHash(animeName, streamUrl, size, duration, apiConfigs, apiPriority) {
@@ -1691,6 +1840,21 @@
         if (!itemInfoMap) { return null; }
         const { _episode_key, animeId, episode, seriesOrMovieId } = itemInfoMap;
 
+        // 修正缓存键，区分官方和自定义API
+        const useOfficialApi = lsGetItem(lsKeys.useOfficialApi.id);
+        const useCustomApi = lsGetItem(lsKeys.useCustomApi.id);
+        const apiPriority = lsGetItem(lsKeys.apiPriority.id);
+        const enabledApis = apiPriority.filter(apiKey => {
+            if (apiKey === 'official') return useOfficialApi;
+            if (apiKey === 'custom') return useCustomApi;
+            return false;
+        });
+        const unique_episode_key = lsLocalKeys.apiPrefix + `${enabledApis.join('_')}_` + _episode_key;
+        // 单集缓存优先于上下集推理
+        if (is_auto && window.localStorage.getItem(unique_episode_key)) {
+            return JSON.parse(window.localStorage.getItem(unique_episode_key));
+        }
+
         // 下一集/上一集推理逻辑
         const previous_info = window.ede.previous_episode_info;
         if (is_auto && previous_info && previous_info.episodeId && previous_info.seriesOrMovieId === seriesOrMovieId) {
@@ -1734,20 +1898,6 @@
                     console.log(`[推理匹配] 失败，episodeId: ${predictedEpisodeId} 无弹幕，回退到常规匹配。`);
                 }
             }
-        }
-
-        // 修正缓存键，区分官方和自定义API
-        const useOfficialApi = lsGetItem(lsKeys.useOfficialApi.id);
-        const useCustomApi = lsGetItem(lsKeys.useCustomApi.id);
-        const apiPriority = lsGetItem(lsKeys.apiPriority.id);
-        const enabledApis = apiPriority.filter(apiKey => {
-            if (apiKey === 'official') return useOfficialApi;
-            if (apiKey === 'custom') return useCustomApi;
-            return false;
-        });
-        const unique_episode_key = lsLocalKeys.apiPrefix + `${enabledApis.join('_')}_` + _episode_key;
-        if (is_auto && window.localStorage.getItem(unique_episode_key)) {
-            return JSON.parse(window.localStorage.getItem(unique_episode_key));
         }
 
         const res = await searchEpisodes(itemInfoMap);
@@ -4642,8 +4792,8 @@
                 slider.dispatchEvent(e);
             });
         }
-        if (OS.isEmbyTheater()) {
-            // 以下兼容旧版本emby,控制器操作锁定滑块焦点
+        {
+            // 控制器操作锁定滑块焦点,防止方向键触发空间导航跳转焦点
             slider.addEventListener('keydown', e => {
                 const orient = slider.getAttribute('orient') || 'horizontal';
                 if ((orient === 'horizontal' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) ||
